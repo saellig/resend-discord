@@ -2,77 +2,57 @@ require('dotenv').config();
 const express = require('express');
 const axios = require('axios');
 const crypto = require('crypto');
-
 const app = express();
+
 const PORT = process.env.PORT || 8080;
 const DISCORD_WEBHOOK_URL = process.env.DISCORD_WEBHOOK_URL;
 const SIGNING_SECRET = process.env.SIGNING_SECRET;
 
-if (!DISCORD_WEBHOOK_URL || !SIGNING_SECRET) {
-  console.error('ERROR: Missing DISCORD_WEBHOOK_URL or SIGNING_SECRET in environment!');
-  process.exit(1);
-}
+// Use raw buffer to capture rawBody before parsing
+app.use('/resend-webhook', express.raw({ type: '*/*' }));
 
-// Middleware to capture raw body for signature verification
-app.use((req, res, next) => {
-  let data = '';
-  req.on('data', chunk => {
-    data += chunk;
-  });
-  req.on('end', () => {
-    req.rawBody = data;
-    try {
-      req.body = JSON.parse(data);
-    } catch {
-      req.body = {};
-    }
-    next();
-  });
-});
-
-// Verify signature function
+// Signature verifier
 function verifySignature(payload, signature, secret) {
   const hmac = crypto.createHmac('sha256', secret);
-  hmac.update(payload, 'utf8');
+  hmac.update(payload);
   const digest = hmac.digest('base64');
   return signature === digest;
 }
 
+// Webhook endpoint
 app.post('/resend-webhook', async (req, res) => {
   const signature = req.headers['resend-signature'];
-  if (!signature) {
-    return res.status(401).send('Missing signature header');
-  }
+  const rawBody = req.body;
 
-  if (!verifySignature(req.rawBody, signature, SIGNING_SECRET)) {
+  if (!signature || !verifySignature(rawBody, signature, SIGNING_SECRET)) {
     return res.status(401).send('Invalid signature');
   }
 
-  const event = req.body;
-  if (!event.type || !event.data) {
+  const event = JSON.parse(rawBody.toString('utf8'));
+
+  const { type, data } = event;
+  if (!type || !data) {
     return res.status(400).send('Invalid webhook payload');
   }
 
   let message;
-  switch (event.type) {
-    case 'email.sent':
-      message = `📤 **Email sent** to \`${event.data.to}\`\nSubject: **${event.data.subject}**`;
-      break;
-    case 'email.delivered':
-      message = `✅ **Email delivered** to \`${event.data.to}\``;
-      break;
-    default:
-      message = `ℹ️ Unknown event type: \`${event.type}\``;
+  if (type === 'email.sent') {
+    message = `📤 **Email sent** to \`${data.to}\`\nSubject: **${data.subject}**`;
+  } else if (type === 'email.delivered') {
+    message = `✅ **Email delivered** to \`${data.to}\``;
+  } else {
+    message = `ℹ️ Unknown event type: \`${type}\``;
   }
 
   try {
     await axios.post(DISCORD_WEBHOOK_URL, { content: message });
-    return res.status(200).send('OK');
-  } catch (err) {
-    return res.status(500).send('Failed to send to Discord');
+    res.status(200).send('OK');
+  } catch {
+    res.status(500).send('Failed to send to Discord');
   }
 });
 
+// Basic health check
 app.get('/', (req, res) => {
   res.send('Resend Webhook Relay is running!');
 });
