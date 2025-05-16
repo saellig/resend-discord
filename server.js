@@ -1,34 +1,40 @@
 require('dotenv').config();
 const express = require('express');
+const crypto = require('crypto');
 const axios = require('axios');
 const bodyParser = require('body-parser');
-const crypto = require('crypto');
 
 const app = express();
-const PORT = process.env.PORT || 8080;
+const PORT = process.env.PORT || 3000;
 
 const DISCORD_WEBHOOK_URL = process.env.DISCORD_WEBHOOK_URL;
-const RESEND_SIGNING_SECRET = process.env.RESEND_SIGNING_SECRET;
+const SIGNING_SECRET = process.env.SIGNING_SECRET;
 
-// Parse JSON and keep raw body for signature verification
+// Capture raw body for signature verification
 app.use(bodyParser.json({
   verify: (req, res, buf) => {
     req.rawBody = buf.toString();
   }
 }));
 
+// Helper: Verify webhook signature
+function verifySignature(payload, signature, secret) {
+  const hmac = crypto.createHmac('sha256', secret);
+  hmac.update(payload, 'utf8');
+  const digest = hmac.digest('base64');
+  return crypto.timingSafeEqual(Buffer.from(signature), Buffer.from(digest));
+}
+
 app.post('/resend-webhook', async (req, res) => {
   const signature = req.headers['resend-signature'];
   const payload = req.rawBody;
 
-  // Compute expected signature
-  const expectedSignature = crypto
-    .createHmac('sha256', RESEND_SIGNING_SECRET)
-    .update(payload)
-    .digest('base64');
+  if (!signature) {
+    return res.status(400).send('Missing signature');
+  }
 
-  if (!signature || signature !== expectedSignature) {
-    console.warn('Invalid signature:', signature, expectedSignature);
+  if (!verifySignature(payload, signature, SIGNING_SECRET)) {
+    console.error('Invalid signature:', signature);
     return res.status(401).send('Invalid signature');
   }
 
