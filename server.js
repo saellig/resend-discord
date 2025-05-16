@@ -8,7 +8,12 @@ const PORT = process.env.PORT || 8080;
 const DISCORD_WEBHOOK_URL = process.env.DISCORD_WEBHOOK_URL;
 const SIGNING_SECRET = process.env.SIGNING_SECRET;
 
-// Raw body middleware to verify signature
+if (!DISCORD_WEBHOOK_URL || !SIGNING_SECRET) {
+  console.error('ERROR: Missing DISCORD_WEBHOOK_URL or SIGNING_SECRET in environment!');
+  process.exit(1);
+}
+
+// Middleware to capture raw body for signature verification
 app.use((req, res, next) => {
   let data = '';
   req.on('data', chunk => {
@@ -25,17 +30,21 @@ app.use((req, res, next) => {
   });
 });
 
-// Verify webhook signature function
+// Verify signature function
 function verifySignature(payload, signature, secret) {
   const hmac = crypto.createHmac('sha256', secret);
-  hmac.update(payload);
+  hmac.update(payload, 'utf8');
   const digest = hmac.digest('base64');
   return signature === digest;
 }
 
 app.post('/resend-webhook', async (req, res) => {
   const signature = req.headers['resend-signature'];
-  if (!signature || !verifySignature(req.rawBody, signature, SIGNING_SECRET)) {
+  if (!signature) {
+    return res.status(401).send('Missing signature header');
+  }
+
+  if (!verifySignature(req.rawBody, signature, SIGNING_SECRET)) {
     return res.status(401).send('Invalid signature');
   }
 
@@ -44,22 +53,23 @@ app.post('/resend-webhook', async (req, res) => {
     return res.status(400).send('Invalid webhook payload');
   }
 
-  const { type, data } = event;
-  let message = '';
-
-  if (type === 'email.sent') {
-    message = `📤 **Email sent** to \`${data.to}\`\nSubject: **${data.subject}**`;
-  } else if (type === 'email.delivered') {
-    message = `✅ **Email delivered** to \`${data.to}\``;
-  } else {
-    message = `ℹ️ Unknown event type: \`${type}\``;
+  let message;
+  switch (event.type) {
+    case 'email.sent':
+      message = `📤 **Email sent** to \`${event.data.to}\`\nSubject: **${event.data.subject}**`;
+      break;
+    case 'email.delivered':
+      message = `✅ **Email delivered** to \`${event.data.to}\``;
+      break;
+    default:
+      message = `ℹ️ Unknown event type: \`${event.type}\``;
   }
 
   try {
     await axios.post(DISCORD_WEBHOOK_URL, { content: message });
-    res.status(200).send('OK');
-  } catch {
-    res.status(500).send('Failed to send to Discord');
+    return res.status(200).send('OK');
+  } catch (err) {
+    return res.status(500).send('Failed to send to Discord');
   }
 });
 
